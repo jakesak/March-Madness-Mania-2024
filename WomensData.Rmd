@@ -1,0 +1,879 @@
+---
+title: "Womens Data"
+output: html_document
+date: "2024-03-19"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+#load libraries
+library(readr) # for reading in data
+library(dplyr) # for data cleaning
+library(tidyr)
+library(purrr) # for functional programming
+library(forcats) # for recoding factors
+library(limSolve) # for solving linear equations
+library(sqldf)
+library(XML)
+library(RCurl)
+library(elo)
+setwd("/Users/jakesak/Documents/MM Mania Kaggle/Code")
+```
+
+```{r}
+#Womens ELO Code
+WCompactResults <- read.csv(file.path("../Data", "WRegularSeasonCompactResults.csv" ))
+
+test <- function(params) {
+  K = params[1]
+  loc = params[2]
+  score = params[3]
+  date = params[4]
+  for (year in min(WCompactResults$Season):max(WCompactResults$Season)) {
+    results <- WCompactResults[which(WCompactResults$Season == year),]
+    #Remove rows with NA, NaN, or Inf in critical columns
+    results <- results[!is.na(results$WScore) & !is.na(results$LScore) 
+                       & is.finite(results$WScore) & is.finite(results$LScore), ]
+    results <- results[is.finite(results$DayNum),]
+    #Add result col for scoring elo, 1 for win, 0.5 for ot win
+    results$result <- ifelse(results$NumOT > 0, 0.5, 1)
+    #results$result <- score(results$WScore, results$LScore)
+    
+    #Add score margin, half margin if overtime
+    results$Margin <- ifelse(results$NumOT >0, 0.5*(results$WScore - results$LScore),
+                             results$WScore - results$LScore)
+    #Cap off margin to exclude blowouts
+    margin_cap = 25
+    results$Margin <- pmin(results$Margin, margin_cap)
+    
+    #Add Location value, 1 for home win, -1 for away win, 0 for neutral
+    results$Loc <- ifelse(results$WLoc == "H", -1, 
+                          ifelse(results$WLoc == "A", 1, 0)) * loc
+    
+    #Reverse Day Num so regressed for earlier games
+    results$ReverseDayNum <- (max(results$DayNum) + 1) - results$DayNum 
+    
+    
+    #Confirm data is clean
+    results <- results[is.finite(results$Loc) & is.finite(results$DayNum),]
+    
+    #Create the elo model
+    elo_model <- elo.run(data = results, 
+                         formula = result ~ 
+                           adjust(as.character(WTeamID), Loc)
+                         + as.character(LTeamID) + 
+                           regress(ReverseDayNum, 1500, date), 
+                         k = (K + (results$Margin*score)) )
+    
+    #Expand elo model to data frame
+    elo_results <- elo_model %>%
+      as.data.frame()
+    #Combine results data with elo data
+    results2 <- cbind(results, elo_results)
+    
+    
+    #Test on 2nd half of season
+    mid_date <- median(results$DayNum)
+    test_model <- results[
+      which(results$DayNum > mid_date),]
+    results3 <- merge(x = results2, y = test_model[c("Season", "DayNum",
+                                                         "WTeamID","LTeamID")], 
+                      by = c("Season", "DayNum","WTeamID", "LTeamID"), all.y = TRUE)
+    
+    #Final elos function, add year and team id
+    final_elos <- as.data.frame(final.elos(elo_model))
+    names(final_elos)[1] <- "ELO"
+    final_elos$Season <- year
+    final_elos$TeamID <- row.names(final_elos)
+    final_elos$TeamID <- as.integer(row.names(final_elos))
+    
+    
+    #If first year, create final elo dataframe otherwise add final elo for every year
+    ifelse(year == min(WCompactResults$Season), final_elo <- final_elos, 
+           final_elo <- rbind(final_elo, final_elos))
+    #If first year, create all games dataframe, otherwise add results2 for every year
+    ifelse(year == min(WCompactResults$Season), all_games <- results2, 
+           all_games <- rbind(all_games, results2))
+  }
+  final_elo <<- final_elo
+  all_games <<- na.omit(all_games)
+  results3$error <- (results3$result - results3$p.A)^2
+  errorVal <- sum(results3$error)/nrow(results3)
+  
+  #Confirm data is finite
+  if (!is.finite(errorVal)) {
+    warning("Non-finite value encountered. Returning a large number instead.")
+    return(1e6)  # Return a large but finite value to indicate a poor fit
+  }
+  return(errorVal)
+}
+
+optim(par=c(0,0,0,0), fn=test, 
+      lower = c(0,-Inf,-Inf,0), upper = c(Inf,Inf,Inf,1), method="L-BFGS-B")
+
+FinalElo_W <- final_elo %>%
+  group_by(Season) %>%
+  arrange(Season, desc(ELO)) %>%
+  mutate(Rank = dense_rank(desc(ELO))) %>%
+  ungroup()
+```
+
+```{r}
+WTeams <- read.csv(file.path("../Data", "WTeams.csv" ))
+elo_2024 <- FinalElo_W %>% filter(Season == 2024)
+Final_elo_2024 <- merge(elo_2024, WTeams[, c("TeamID", "TeamName")], 
+                        by.x = "TeamID", by.y = "TeamID", all.x = TRUE)
+sorted_final_elo_2024 <- Final_elo_2024 %>% 
+  arrange(desc(ELO)) %>%
+  mutate(Rank = row_number())
+sorted_final_elo_2024
+```
+
+
+```{r}
+WDetailedResults <- read.csv(file.path("../Data", "WRegularSeasonDetailedResults.csv" ))
+WCompactResults <- WCompactResults %>% filter(Season >= min(WDetailedResults$Season))
+```
+
+
+```{r}
+#Womens Basic Metrics
+WELO <- FinalElo_W
+
+suppressMessages(
+for (year in min(WCompactResults$Season):max(WCompactResults$Season)) {
+  data <- WCompactResults[which(WCompactResults$Season == year),]
+  elo_season <- WELO[which(WELO$Season == year),]
+  #Data when winning
+  wins_df <- data %>% 
+    group_by(WTeamID, Season) %>% 
+    summarize(WPts_for = sum(WScore), WPts_against = sum(LScore), 
+              WPts_diff = mean(WScore - LScore), Wins = n()) %>%
+    rename(TeamID = WTeamID)
+  #Data when losing
+  loss_df <- data %>% 
+    group_by(LTeamID, Season) %>% 
+    summarize(LPts_for = sum(LScore), LPts_against = sum(WScore), 
+              LPts_diff = mean(LScore - WScore), Losses = n(),
+              LBlowouts = sum((WScore-LScore) >= 25 ),
+              LClose = sum((WScore-LScore) <= 5 )) %>% 
+    rename(TeamID = LTeamID)
+  #Merge and clean
+  results <- merge(wins_df, loss_df, by = c("TeamID", "Season"), all = TRUE)
+  results$Wins[is.na(results$Wins)] <- 0
+  results$Losses[is.na(results$Losses)] <- 0
+  #Create winning percentage, points for, and points against cols
+  results <- results %>% 
+    group_by(TeamID, Season) %>% 
+    mutate(Games = Wins+Losses, 
+           Win_pct = Wins/(Wins+Losses), 
+           Pts_for = (WPts_for+LPts_for)/(Wins+Losses), 
+           Pts_against = (WPts_against+LPts_against)/(Wins+Losses),
+           Pts_diff = (WPts_diff*Wins+LPts_diff*Losses)/(Wins+Losses)) %>% 
+    select(Season, TeamID, Games, Win_pct, Pts_for, Pts_against, Pts_diff, LBlowouts, LClose)
+  #Raw SOS (based on opponent winning percentage)
+  raw_sosW <- data %>%
+    left_join(results, by  = c("LTeamID" = "TeamID", "Season")) %>%
+    group_by(WTeamID, Season) %>% 
+    summarize(WSOS = mean(Win_pct), WNum = n()) %>% 
+    rename(TeamID = WTeamID)
+  raw_sosL <- data %>%
+    left_join(results, by  = c("WTeamID" = "TeamID", "Season")) %>%
+    group_by(LTeamID, Season) %>% 
+    summarize(LSOS = mean(Win_pct), LNum = n()) %>% 
+    rename(TeamID = LTeamID)
+  raw_sos <- merge(raw_sosW, raw_sosL, by = c("TeamID", "Season"), all = TRUE)
+  raw_sos$WSOS[is.na(raw_sos$WSOS)] <- 0
+  raw_sos$LSOS[is.na(raw_sos$LSOS)] <- 0
+  raw_sos$WNum[is.na(raw_sos$WNum)] <- 0
+  raw_sos$LNum[is.na(raw_sos$LNum)] <- 0
+  raw_sos <- raw_sos %>% 
+    mutate(rawSOS = ((WSOS*WNum)+(LSOS*LNum))/(WNum+LNum))
+  #ELO SOS (based on opponent elo from prior calculations)
+  elo_sosW <- data %>%
+    left_join(elo_season, by  = c("LTeamID" = "TeamID", "Season")) %>%
+    group_by(WTeamID, Season) %>% 
+    summarize(WELOSOS = mean(ELO), WNum = n()) %>% 
+    rename(TeamID = WTeamID)
+  elo_sosL <- data %>%
+    left_join(elo_season, by  = c("WTeamID" = "TeamID", "Season")) %>%
+    group_by(LTeamID, Season) %>% 
+    summarize(LELOSOS = mean(ELO), LNum = n()) %>% 
+    rename(TeamID = LTeamID)
+  elo_sos <- merge(elo_sosW, elo_sosL, by = c("TeamID", "Season"), all = TRUE)
+  elo_sos$WELOSOS[is.na(elo_sos$WELOSOS)] <- 0
+  elo_sos$LELOSOS[is.na(elo_sos$LELOSOS)] <- 0
+  elo_sos$WNum[is.na(elo_sos$WNum)] <- 0
+  elo_sos$LNum[is.na(elo_sos$LNum)] <- 0
+  elo_sos <- elo_sos %>% 
+    mutate(ELOSOS = ((WELOSOS*WNum)+(LELOSOS*LNum))/(WNum+LNum))
+  #All SOS data
+  SOS <- merge(elo_sos, raw_sos, by = c("TeamID", "Season"), all = TRUE) %>%
+    select(Season, TeamID, rawSOS, ELOSOS)
+  
+   #Wins vs top 50 teams
+  WOppElo <- data %>% 
+    left_join(WELO, by = c("LTeamID" = "TeamID", "Season")) %>%
+    group_by(WTeamID, Season) %>% 
+    rename(LRank = Rank) %>% 
+    filter(LRank <= 50) %>% 
+    summarize(Quad1W = n()) %>% 
+    rename(TeamID = WTeamID)
+  #Loss vs top 50 teams
+  LOppElo <- data %>% 
+    left_join(WELO, by = c("WTeamID" = "TeamID", "Season")) %>%
+    group_by(LTeamID, Season) %>% 
+    rename(WRank = Rank) %>% 
+    filter(WRank <= 50) %>% 
+    summarize(Quad1L = n())%>% 
+    rename(TeamID = LTeamID)
+  #Record vs top 50 teams
+  OppElo <- merge(WOppElo, LOppElo, by = c("TeamID", "Season"), all = TRUE) %>%
+    mutate(Quad1Rec = Quad1W/(Quad1W + Quad1L), Quad1Games = (Quad1W + Quad1L)) %>%
+    mutate(Quad1Rec = replace_na(Quad1Rec, 0), Quad1Games = replace_na(Quad1Games, 0)) %>% 
+    select(Season, TeamID, Quad1Rec, Quad1Games)
+  
+  #Merge with SOS
+  SOS_Q1 <- SOS %>% left_join(OppElo, by = c("Season", "TeamID"))
+  #All simple team metrics
+  results <- results %>% 
+    left_join(SOS_Q1, by = c("Season", "TeamID"))
+  #If first year, create final table, otherwise add data
+  ifelse(year == min(WCompactResults$Season), WSimpleMetrics <- results, 
+         WSimpleMetrics <- rbind(WSimpleMetrics, results))
+})
+SimpleMetrics_W <- WSimpleMetrics
+```
+
+
+
+```{r}
+#Womens Detailed Metrics
+suppressMessages(
+for (year in min(WDetailedResults$Season):max(WDetailedResults$Season)) {
+  data <- WDetailedResults[which(WDetailedResults$Season == year),]
+  #fg pct, 3pt pct, #3pt att/total att, ft att
+  #In wins
+  Wfg_df <- data %>% 
+    group_by(WTeamID, Season) %>% 
+    summarize(WFgPct = (sum(WFGM))/(sum(WFGA)), 
+              W3PtPct = (sum(WFGM3))/(sum(WFGA3)), 
+              W3PtShots = (sum(WFGA3))/(sum(WFGA)), 
+              WFtPct = (sum(WFTM))/(sum(WFTA)),
+              WFtA = (sum(WFTA)/n()),
+              Wins = n()) %>%
+    rename(TeamID = WTeamID)
+  #In losses 
+  Lfg_df <- data %>% 
+    group_by(LTeamID, Season) %>% 
+    summarize(LFgPct = (sum(LFGM))/(sum(LFGA)), 
+              L3PtPct = (sum(LFGM3))/(sum(LFGA3)), 
+              L3PtShots = (sum(LFGA3))/(sum(LFGA)), 
+              LFtPct = (sum(LFTM))/(sum(LFTA)),
+              LFtA = (sum(LFTA)/n()),
+              Losses = n()) %>%
+    rename(TeamID = LTeamID)
+  #Merge and summarize
+  fg_df <- merge(Wfg_df, Lfg_df, by = c("TeamID", "Season"), all = TRUE)
+  fg_df$Wins[is.na(fg_df$Wins)] <- 0
+  fg_df$Losses[is.na(fg_df$Losses)] <- 0
+  fg_df <- fg_df %>% 
+    group_by(TeamID, Season) %>%
+    mutate(FgPct = (WFgPct*Wins+LFgPct*Losses)/(Wins+Losses), 
+           ThreePtPct = (W3PtPct*Wins+L3PtPct*Losses)/(Wins+Losses),
+           ThreePtShots = (W3PtShots*Wins+L3PtShots*Losses)/(Wins+Losses),
+           FtPct = (WFtPct*Wins+LFtPct*Losses)/(Wins+Losses),
+           FtA = (WFtA*Wins+LFtA*Losses)/(Wins+Losses),
+           Games = (Wins + Losses))
+  #opp in wins
+  OppWfg_df <- data %>% 
+    group_by(WTeamID, Season) %>% 
+    summarize(OppWFgPct = (sum(LFGM))/(sum(LFGA)), 
+              OppW3PtPct = (sum(LFGM3))/(sum(LFGA3)), 
+              OppW3PtShots = (sum(LFGA3))/(sum(LFGA)),
+              OppWFtA = (sum(LFTA)/n()),
+              Wins = n()) %>%
+    rename(TeamID = WTeamID)
+  #opp in losses
+  OppLfg_df <- data %>% 
+    group_by(LTeamID, Season) %>% 
+    summarize(OppLFgPct = (sum(WFGM))/(sum(WFGA)), 
+              OppL3PtPct = (sum(WFGM3))/(sum(WFGA3)), 
+              OppL3PtShots = (sum(WFGA3))/(sum(WFGA)), 
+              OppLFtA = (sum(WFTA)/n()),
+              Losses = n()) %>%
+    rename(TeamID = LTeamID)
+  #Merge and summarize
+  opp_fg_df <- merge(OppWfg_df, OppLfg_df, by = c("TeamID", "Season"), all = TRUE)
+  opp_fg_df$Wins[is.na(opp_fg_df$Wins)] <- 0
+  opp_fg_df$Losses[is.na(opp_fg_df$Losses)] <- 0
+  opp_fg_df <- opp_fg_df %>% 
+    group_by(TeamID, Season) %>%
+    mutate(OppFgPct = (OppWFgPct*Wins+OppLFgPct*Losses)/(Wins+Losses), 
+           OppThreePtPct = (OppW3PtPct*Wins+OppL3PtPct*Losses)/(Wins+Losses),
+           OppThreePtShots = (OppW3PtShots*Wins+OppL3PtShots*Losses)/(Wins+Losses),
+           OppFtA = (OppWFtA*Wins+OppLFtA*Losses)/(Wins+Losses)) %>%
+    select(-Wins, -Losses)
+  fg_results <-  merge(fg_df, opp_fg_df, by = c("TeamID", "Season"), all = TRUE) %>% 
+    select(Season, TeamID, FgPct, ThreePtPct, ThreePtShots, FtPct, FtA,
+           OppFgPct, OppThreePtPct, OppThreePtShots, OppFtA, Wins, Losses, Games)
+  #reb, oreb/opponent reb, blocks + steals, turnovers, asst/to
+  #Win stats
+  Wdef_df <- data %>% 
+    group_by(WTeamID, Season) %>% 
+    summarize(WReb = (sum(WOR + WDR)/n()), 
+              WOReb = sum(WOR)/n(),
+              WORebRat = (sum(WOR/LDR)/n()),
+              WBlkStl = (sum(WBlk+WStl)/n()), 
+              WTurn = (sum(WTO)/n()), 
+              WAsstRat = (sum(WAst/WTO)/n()),
+              Wins = n()) %>%
+    rename(TeamID = WTeamID)
+  #Loss stats
+  Ldef_df <- data %>% 
+    group_by(LTeamID, Season) %>% 
+    summarize(LReb = (sum(LOR + LDR)/n()), 
+              LOReb = sum(LOR)/n(),
+              LORebRat = (sum(LOR/(LOR +WDR))/n()),
+              LBlkStl = (sum(LBlk+LStl)/n()), 
+              LTurn = (sum(LTO)/n()), 
+              LAsstRat = (sum(LAst/LTO)/n()),
+              Losses = n()) %>%
+    rename(TeamID = LTeamID)
+  #Merge and summarize
+  def_df <- merge(Wdef_df, Ldef_df, by = c("TeamID", "Season"), all = TRUE)
+  def_df$Wins[is.na(def_df$Wins)] <- 0
+  def_df$Losses[is.na(def_df$Losses)] <- 0
+  def_df <- def_df %>% 
+    group_by(TeamID, Season) %>%
+    mutate(Reb = (WReb*Wins+LReb*Losses)/(Wins+Losses),
+           OReb = (WOReb*Wins+LOReb*Losses)/(Wins+Losses),
+           ORebRat = (WORebRat*Wins+LORebRat*Losses)/(Wins+Losses),
+           BlkStl = (WBlkStl*Wins+ LBlkStl*Losses)/(Wins+Losses),
+           TO = (WTurn*Wins+ LTurn*Losses)/(Wins+Losses),
+           AsstRat = (WAsstRat*Wins+ LAsstRat*Losses)/(Wins+Losses),
+           Games = (Wins + Losses))
+  #opp in wins 
+  OppWdef_df <- data %>% 
+    group_by(WTeamID, Season) %>% 
+    summarize(OppWReb = (sum(LOR + LDR)/n()), 
+              OppWORebRat = (sum(LOR/WDR)/n()),
+              OppWBlkStl = (sum(LBlk+LStl)/n()), 
+              OppWAsstRat = (sum(LAst/LTO)/n()),
+              Wins = n()) %>%
+    rename(TeamID = WTeamID)
+  #opp in losses
+  OppLdef_df <- data %>% 
+    group_by(LTeamID, Season) %>% 
+    summarize(OppLReb = (sum(WOR + WDR)/n()), 
+              OppLORebRat = (sum(WOR/LDR)/n()),
+              OppLBlkStl = (sum(WBlk+WStl)/n()), 
+              OppLAsstRat = (sum(WAst/WTO)/n()),
+              Losses = n()) %>%
+    rename(TeamID = LTeamID)
+  #Merge and summarize
+  opp_def_df <- merge(OppWdef_df, OppLdef_df, by = c("TeamID", "Season"), all = TRUE)
+  opp_def_df$Wins[is.na(opp_def_df$Wins)] <- 0
+  opp_def_df$Losses[is.na(opp_def_df$Losses)] <- 0
+  opp_def_df <- opp_def_df %>% 
+    group_by(TeamID, Season) %>%
+    mutate(OppReb = (OppWReb*Wins+OppLReb*Losses)/(Wins+Losses),
+           OppORebRat = (OppWORebRat*Wins+OppLORebRat*Losses)/(Wins+Losses),
+           OppBlkStl = (OppWBlkStl*Wins+ OppLBlkStl*Losses)/(Wins+Losses),
+           OppAsstRat = (OppWAsstRat*Wins+ OppLAsstRat*Losses)/(Wins+Losses)) %>% 
+    select(-Wins, -Losses)
+  def_results <-  merge(def_df, opp_def_df, by = c("TeamID", "Season"), all = TRUE) %>%
+    select(Season, TeamID, Reb, OReb, ORebRat, BlkStl, TO, AsstRat, 
+           OppReb, OppORebRat, OppBlkStl, OppAsstRat)
+  #Merge fg and def dataframes
+  results <- merge(fg_results, def_results, by = c("TeamID", "Season"), all = TRUE)
+  #If first year, create final table, otherwise add data
+  ifelse(year == min(WCompactResults$Season), WDetailedMetrics <- results, 
+         WDetailedMetrics <- rbind(WDetailedMetrics, results))
+})
+DetailedMetrics_W <- WDetailedMetrics
+```
+
+
+
+```{r}
+#Merge All DataFrames
+#Merge Metrics
+WMetrics <- merge(SimpleMetrics_W, DetailedMetrics_W, 
+                 by = c("TeamID", "Season", "Games"), all = TRUE)
+#Merge metrics and ELO
+WPredictors <- merge(WMetrics, FinalElo_W, by = c("TeamID", "Season"), all.x = TRUE) %>% 
+  select(-Games)
+
+#Save Predictors as CSV
+setwd("/Users/jakesak/Documents/MM Mania Kaggle/Data")
+write.csv(WPredictors, file = "wpredictors.csv", row.names = FALSE)
+```
+
+
+
+```{r}
+#Load libraries
+setwd("/Users/jakesak/Documents/MM Mania Kaggle/Code")
+library(dplyr) # for data cleaning
+library(xgboost) #For modelling
+WNCAATourneyCompactResults <- read.csv(file.path("../Data", "WNCAATourneyCompactResults.csv" ))
+WNCAATourneyCompactResults <- WNCAATourneyCompactResults %>% filter(Season >= min(WDetailedResults$Season))
+WNCAATourneySeeds <- read.csv(file.path("../Data", "WNCAATourneySeeds.csv" ))
+WNCAATourneySeeds <- WNCAATourneySeeds %>% filter(Season >= min(WDetailedResults$Season))
+
+
+#Set up df
+results <- WNCAATourneyCompactResults
+results$Team1 <- ifelse(results$WTeamID < results$LTeamID, results$WTeamID, results$LTeamID)
+results$Team2 <- ifelse(results$WTeamID > results$LTeamID, results$WTeamID, results$LTeamID)
+results <- results %>% 
+  left_join(WPredictors, by = c("Team1" = "TeamID", "Season")) %>% 
+  rename(T1Win_pct = Win_pct, T1Pts_for = Pts_for, T1Pts_against = Pts_against, 
+         T1Pts_diff = Pts_diff, T1LBlowouts = LBlowouts, T1LClose = LClose, 
+         T1rawSOS = rawSOS, T1ELOSOS = ELOSOS, T1FgPct = FgPct, T1ThreePtPct = ThreePtPct, 
+         T1ThreePtShots = ThreePtShots, T1FtPct = FtPct, T1FtA = FtA,
+         T1OppFgPct = OppFgPct, T1OppThreePtPct = OppThreePtPct, 
+         T1OppThreePtShots = OppThreePtShots, T1OppFtA = OppFtA, T1Wins = Wins, 
+         T1Losses = Losses, T1Reb = Reb, T1OReb = OReb, T1ORebRat = ORebRat, T1BlkStl = BlkStl, 
+         T1TO = TO, T1AsstRat = AsstRat, T1OppReb = OppReb, T1OppORebRat = OppORebRat, 
+         T1OppBlkStl = OppBlkStl, T1OppAsstRat = OppAsstRat, T1ELO = ELO,
+         T1Quad1Rec = Quad1Rec, T1Quad1Games = Quad1Games, T1Rank = Rank)
+results<- results %>% 
+  left_join(WPredictors, by = c("Team2" = "TeamID", "Season")) %>% 
+  rename(T2Win_pct = Win_pct, T2Pts_for = Pts_for, T2Pts_against = Pts_against,
+         T2Pts_diff = Pts_diff, T2LBlowouts = LBlowouts, T2LClose = LClose, 
+         T2rawSOS = rawSOS, T2ELOSOS = ELOSOS, T2FgPct = FgPct, T2ThreePtPct = ThreePtPct, 
+         T2ThreePtShots = ThreePtShots, T2FtPct = FtPct, T2FtA = FtA,
+         T2OppFgPct = OppFgPct, T2OppThreePtPct = OppThreePtPct, 
+         T2OppThreePtShots = OppThreePtShots, T2OppFtA = OppFtA, T2Wins = Wins, 
+         T2Losses = Losses, T2Reb = Reb, T2OReb = OReb, T2ORebRat = ORebRat, T2BlkStl = BlkStl, 
+         T2TO = TO, T2AsstRat = AsstRat, T2OppReb = OppReb, T2OppORebRat = OppORebRat, 
+         T2OppBlkStl = OppBlkStl, T2OppAsstRat = OppAsstRat, T2ELO = ELO,
+         T2Quad1Rec = Quad1Rec, T2Quad1Games = Quad1Games, T2Rank = Rank)
+results <- results %>%
+  left_join(WNCAATourneySeeds, by = c("Team1" = "TeamID", "Season")) %>%
+  rename(Seed_T1 = Seed)
+results <- results %>%
+  left_join(WNCAATourneySeeds, by = c("Team2" = "TeamID", "Season")) %>%
+  rename(Seed_T2 = Seed)
+results$SeedNum_T1 <- as.numeric(substr(results$Seed_T1,2,3))
+results$SeedNum_T2 <- as.numeric(substr(results$Seed_T2,2,3))
+results$Seed_len1 <- substr(results$Seed_T1,1,3)
+results$Seed_len2 <- substr(results$Seed_T2,1,3)
+
+results$result <- ifelse(results$WTeamID < results$LTeamID, 1, 0)
+results$Score1 <- ifelse(results$WTeamID < results$LTeamID, results$WScore, results$LScore)
+results$Score2 <- ifelse(results$WTeamID > results$LTeamID, results$WScore, results$LScore)
+results <- results %>%
+  mutate(ELO_diff = T1ELO-T2ELO,
+        Seed_diff = SeedNum_T1 - SeedNum_T2,
+        Win_pct_dif = T1Win_pct - T2Win_pct,
+        PTS_for = T1Pts_for - T2Pts_for,
+        PTS_against = T1Pts_against - T2Pts_against,
+        ThreePtShots_diff = T1ThreePtShots - T2ThreePtShots,
+        Reb_diff = T1Reb - T2Reb,
+        ORebRate_diff = T1ORebRat - T2ORebRat,
+        OppORebRate_diff = T1OppORebRat - T2OppORebRat,
+        rawSOS_diff = T1rawSOS - T2rawSOS,
+        ELOSOS_diff = T1ELOSOS - T2ELOSOS,
+        Rank_diff = T1Rank - T2Rank)
+results <- results[which(results$Seed_len1 != results$Seed_len2),]
+```
+
+
+```{r}
+#Set Predictors
+predictors <- c("T1Win_pct", "T1Pts_for", "T1Pts_against","T1Pts_diff", "T1LBlowouts", 
+                "T1LClose", "T1rawSOS", "T1ELOSOS", "T1FgPct", "T1ThreePtPct", "T1ThreePtShots",
+                "T1FtPct", "T1FtA", "T1OppFgPct", "T1OppThreePtPct", "T1OppThreePtShots", 
+                "T1OppFtA", "T1Wins", "T1Losses", "T1Reb", "T1OReb", "T1ORebRat", "T1BlkStl",
+                "T1TO", "T1AsstRat", "T1OppReb", "T1OppORebRat", 
+                "T1OppBlkStl", "T1OppAsstRat", "T2OppBlkStl", "T2OppAsstRat", 
+                "T1ELO", "T1Quad1Rec", "T1Quad1Games", "T2Win_pct", "T2Pts_for", 
+                "T2Pts_against", "T2Pts_diff", "T2LBlowouts", "T2LClose","T2rawSOS", 
+                "T2ELOSOS", "T2FgPct", "T2ThreePtPct", "T2ThreePtShots", "T2FtPct", 
+                "T2FtA", "T2OppFgPct", "T2OppThreePtPct", "T2OppThreePtShots", 
+                "T2OppFtA", "T2Wins", "T2Losses", "T2Reb", "T2OReb", "T2ORebRat", "T2BlkStl", 
+                "T2TO", "T2AsstRat", "T2OppReb", "T2OppORebRat", 
+                "T2ELO", "T2Quad1Rec", "T2Quad1Games", "ELO_diff", 
+                "T1Rank", "T2Rank", "Rank_diff",
+                "Seed_diff", "Win_pct_dif", "PTS_for", "PTS_against", 
+                "ThreePtShots_diff", "Reb_diff", "ORebRate_diff", "OppORebRate_diff", 
+                "rawSOS_diff", "ELOSOS_diff")
+
+#Set features and label
+dtrain <- xgb.DMatrix(data = as.matrix(results[, predictors]), label = results$result)
+
+#Parameters
+params <- list(
+  objective = "binary:logistic",
+  booster = "gbtree",
+  eta = 0.01,
+  max_depth = 6,
+  subsample = 0.8,
+  colsample_bytree = 0.8
+)
+
+# Cross-validation
+cv_results <- xgb.cv(params = params,
+                     data = dtrain,
+                     nrounds = 1000,
+                     nfold = 5,
+                     metrics = "logloss",
+                     early_stopping_rounds = 10,
+                     maximize = FALSE,
+                     Prediction = TRUE,
+                     verbose = 0)
+# Extract the best number of rounds
+best_nrounds <- cv_results$best_iteration
+# Re-train the model on the full dataset using the best number of rounds
+Wfinal_model <- xgb.train(params = params,
+                         data = dtrain,
+                         nrounds = best_nrounds)
+```
+
+
+```{r}
+ErrorTable <- data.frame(Season = numeric(), error = numeric())
+
+for (year in unique(results$Season)) {
+  data <- results[which(results$Season == year),]
+  dtest <- xgb.DMatrix(data = as.matrix(data[, predictors]))
+  predictions <- predict(Wfinal_model, dtest)
+  true_outcomes <- data$result
+  error <- mean((true_outcomes - predictions)^2)
+  year_error <- data.frame(Season = year, error = error)
+  ErrorTable <- rbind(ErrorTable, year_error)
+}
+
+ErrorTable <- ErrorTable %>% filter(Season >= 2018)
+print(ErrorTable)
+```
+
+
+```{r}
+#True Acc vs Chalk Acc 2023
+data <- results[which(results$Season == 2023),]
+true_outcomes <- data$result
+dtest <- xgb.DMatrix(data = as.matrix(data[, predictors]))
+predictions <- predict(Wfinal_model, dtest)
+data$pred1 <- ifelse(predictions >= 0.5, 1, 0)
+predictions1 <- data$pred1
+TrueAcc <-mean(predictions1 == true_outcomes)
+print(TrueAcc)
+
+data$Chalk <- ifelse(data$SeedNum_T1 <= data$SeedNum_T2, 
+                     1, 0)
+predictions2 <- data$Chalk
+ChalkAcc <- mean(predictions2 == true_outcomes)
+print(ChalkAcc)
+```
+
+
+```{r}
+#Load libraries
+library(dplyr) # for data cleaning
+library(xgboost) #For modelling
+
+Seeds <- read.csv(file.path("../Data", "2024_tourney_seeds.csv" ))
+WomensSeeds <- Seeds %>% 
+  filter(Tournament == "W")
+Sub <- read.csv(file.path("../Data", "sample_submission.csv" ))
+Slots <- read.csv(file.path("../Data", "WNCAATourneySlots.csv" ))
+WTeams <- read.csv(file.path("../Data", "WTeams.csv" ))
+WTeams <- WTeams %>% select(TeamID, TeamName)
+
+#General
+Predictors_2024 <- WPredictors %>% filter(Season == 2024)
+predictors <- c("T1Win_pct", "T1Pts_for", "T1Pts_against","T1Pts_diff", "T1LBlowouts", 
+                "T1LClose", "T1rawSOS", "T1ELOSOS", "T1FgPct", "T1ThreePtPct", "T1ThreePtShots",
+                "T1FtPct", "T1FtA", "T1OppFgPct", "T1OppThreePtPct", "T1OppThreePtShots", 
+                "T1OppFtA", "T1Wins", "T1Losses", "T1Reb", "T1OReb", "T1ORebRat", "T1BlkStl",
+                "T1TO", "T1AsstRat", "T1OppReb", "T1OppORebRat", 
+                "T1OppBlkStl", "T1OppAsstRat", "T2OppBlkStl", "T2OppAsstRat", 
+                "T1ELO", "T1Quad1Rec", "T1Quad1Games", "T2Win_pct", "T2Pts_for", 
+                "T2Pts_against", "T2Pts_diff", "T2LBlowouts", "T2LClose","T2rawSOS", 
+                "T2ELOSOS", "T2FgPct", "T2ThreePtPct", "T2ThreePtShots", "T2FtPct", 
+                "T2FtA", "T2OppFgPct", "T2OppThreePtPct", "T2OppThreePtShots", 
+                "T2OppFtA", "T2Wins", "T2Losses", "T2Reb", "T2OReb", "T2ORebRat", "T2BlkStl", 
+                "T2TO", "T2AsstRat", "T2OppReb", "T2OppORebRat", 
+                "T2ELO", "T2Quad1Rec", "T2Quad1Games", "ELO_diff", 
+                "T1Rank", "T2Rank", "Rank_diff",
+                "Seed_diff", "Win_pct_dif", "PTS_for", "PTS_against", 
+                "ThreePtShots_diff", "Reb_diff", "ORebRate_diff", "OppORebRate_diff", 
+                "rawSOS_diff", "ELOSOS_diff")
+
+#Seeding info
+initial_slots <- c(
+  'R1W1', 'R1W2', 'R1W3', 'R1W4', 'R1W5', 'R1W6', 'R1W7', 'R1W8',
+  'R1X1', 'R1X2', 'R1X3', 'R1X4', 'R1X5', 'R1X6', 'R1X7', 'R1X8',
+  'R1Y1', 'R1Y2', 'R1Y3', 'R1Y4', 'R1Y5', 'R1Y6', 'R1Y7', 'R1Y8',
+  'R1Z1', 'R1Z2', 'R1Z3', 'R1Z4', 'R1Z5', 'R1Z6', 'R1Z7', 'R1Z8'
+)
+
+initial_matchups <- list(
+  'R1W1' = c("01", "16"),
+  'R1W2' = c("02", "15"),
+  'R1W3' = c("03", "14"),
+  'R1W4' = c("04", "13"),
+  'R1W5' = c("05", "12"),
+  'R1W6' = c("06", "11"),
+  'R1W7' = c("07", "10"),
+  'R1W8' = c("08", "09"),
+  'R1X1' = c("01", "16"),
+  'R1X2' = c("02", "15"),
+  'R1X3' = c("03", "14"),
+  'R1X4' = c("04", "13"),
+  'R1X5' = c("05", "12"),
+  'R1X6' = c("06", "11"),
+  'R1X7' = c("07", "10"),
+  'R1X8' = c("08", "09"),
+  'R1Y1' = c("01", "16"),
+  'R1Y2' = c("02", "15"),
+  'R1Y3' = c("03", "14"),
+  'R1Y4' = c("04", "13"),
+  'R1Y5' = c("05", "12"),
+  'R1Y6' = c("06", "11"),
+  'R1Y7' = c("07", "10"),
+  'R1Y8' = c("08", "09"),
+  'R1Z1' = c("01", "16"),
+  'R1Z2' = c("02", "15"),
+  'R1Z3' = c("03", "14"),
+  'R1Z4' = c("04", "13"),
+  'R1Z5' = c("05", "12"),
+  'R1Z6' = c("06", "11"),
+  'R1Z7' = c("07", "10"),
+  'R1Z8' = c("08", "09")
+)
+
+
+round2_map <- list(
+  'R1W1' = 'R2W1', 'R1W8' = 'R2W1',
+  'R1W2' = 'R2W2', 'R1W7' = 'R2W2',
+  'R1W3' = 'R2W3', 'R1W6' = 'R2W3',
+  'R1W4' = 'R2W4', 'R1W5' = 'R2W4',
+  'R1X1' = 'R2X1', 'R1X8' = 'R2X1',
+  'R1X2' = 'R2X2', 'R1X7' = 'R2X2',
+  'R1X3' = 'R2X3', 'R1X6' = 'R2X3',
+  'R1X4' = 'R2X4', 'R1X5' = 'R2X4',
+  'R1Y1' = 'R2Y1', 'R1Y8' = 'R2Y1',
+  'R1Y2' = 'R2Y2', 'R1Y7' = 'R2Y2',
+  'R1Y3' = 'R2Y3', 'R1Y6' = 'R2Y3',
+  'R1Y4' = 'R2Y4', 'R1Y5' = 'R2Y4',
+  'R1Z1' = 'R2Z1', 'R1Z8' = 'R2Z1',
+  'R1Z2' = 'R2Z2', 'R1Z7' = 'R2Z2',
+  'R1Z3' = 'R2Z3', 'R1Z6' = 'R2Z3',
+  'R1Z4' = 'R2Z4', 'R1Z5' = 'R2Z4'
+)
+
+round3_map <- list(
+  'R2W1' = 'R3W1', 'R2W4' = 'R3W1',
+  'R2W2' = 'R3W2', 'R2W3' = 'R3W2',
+  'R2X1' = 'R3X1', 'R2X4' = 'R3X1',
+  'R2X2' = 'R3X2', 'R2X3' = 'R3X2',
+  'R2Y1' = 'R3Y1', 'R2Y4' = 'R3Y1',
+  'R2Y2' = 'R3Y2', 'R2Y3' = 'R3Y2',
+  'R2Z1' = 'R3Z1', 'R2Z4' = 'R3Z1',
+  'R2Z2' = 'R3Z2', 'R2Z3' = 'R3Z2'
+)
+
+round4_map <- list(
+  'R3W1' = 'R4W1', 'R3W2' = 'R4W1',
+  'R3X1' = 'R4X1', 'R3X2' = 'R4X1',
+  'R3Y1' = 'R4Y1', 'R3Y2' = 'R4Y1',
+  'R3Z1' = 'R4Z1', 'R3Z2' = 'R4Z1'
+)
+
+round5_map <- list(
+  'R4W1' = 'R5WX', 'R4X1' = 'R5WX',
+  'R4Y1' = 'R5YZ', 'R4Z1' = 'R5YZ'
+)
+
+round6_map <- list(
+  'R5WX' = 'R6CH',
+  'R5YZ' = 'R6CH'
+)
+```
+
+
+```{r}
+#Round 1 Predictions
+Rd1Df <- data.frame(Slot = character(), Team1 = character(), Team2 = character(), 
+                    SeedNum_T1 = numeric(), SeedNum_T2 = numeric())
+for (key in names(initial_matchups)) {
+  slot <- substr(key, 3, 3)
+  teams <- initial_matchups[[key]]
+  SeedNum_T1 <- as.numeric(teams[1])
+  SeedNum_T2 <- as.numeric(teams[2])
+  team1 <- paste0(slot, teams[1])
+  team2 <- paste0(slot, teams[2])
+  row_df <- data.frame(Slot = key, Team1 = team1, Team2 = team2, 
+                       SeedNum_T1 = SeedNum_T1,  SeedNum_T2 =  SeedNum_T2)
+  Rd1Df <- rbind(Rd1Df, row_df)
+}
+Rd1Df$Tournament = "W"
+
+Rd1_team1 <- Rd1Df %>% 
+  left_join(WomensSeeds, by = c("Tournament", "Team1" = "Seed")) %>% 
+  rename(Team1ID = TeamID)
+Rd1_team2 <- Rd1Df %>% 
+  left_join(WomensSeeds, by = c("Tournament", "Team2" = "Seed")) %>% 
+  rename(Team2ID = TeamID)
+
+Rd1_pred <- merge(Rd1_team1, Rd1_team2, 
+                  by = c("Tournament", "Slot", "Team1", "Team2",  
+                         "SeedNum_T1",  "SeedNum_T2"), all = TRUE)
+Rd1_data <- Rd1_pred %>% 
+  left_join(Predictors_2024, by = c("Team1ID" = "TeamID")) %>% 
+  rename(T1Win_pct = Win_pct, T1Pts_for = Pts_for, T1Pts_against = Pts_against, 
+         T1Pts_diff = Pts_diff, T1LBlowouts = LBlowouts, T1LClose = LClose, 
+         T1rawSOS = rawSOS, T1ELOSOS = ELOSOS, T1FgPct = FgPct, T1ThreePtPct = ThreePtPct, 
+         T1ThreePtShots = ThreePtShots, T1FtPct = FtPct, T1FtA = FtA,
+         T1OppFgPct = OppFgPct, T1OppThreePtPct = OppThreePtPct, 
+         T1OppThreePtShots = OppThreePtShots, T1OppFtA = OppFtA, T1Wins = Wins, 
+         T1Losses = Losses, T1Reb = Reb, T1OReb = OReb, T1ORebRat = ORebRat, T1BlkStl = BlkStl, 
+         T1TO = TO, T1AsstRat = AsstRat, T1OppReb = OppReb, T1OppORebRat = OppORebRat, 
+         T1OppBlkStl = OppBlkStl, T1OppAsstRat = OppAsstRat, T1ELO = ELO,
+         T1Quad1Rec = Quad1Rec, T1Quad1Games = Quad1Games, T1Rank = Rank)
+Rd1_data <- Rd1_data %>% 
+  left_join(Predictors_2024, by = c("Team2ID" = "TeamID")) %>% 
+  rename(T2Win_pct = Win_pct, T2Pts_for = Pts_for, T2Pts_against = Pts_against, 
+         T2Pts_diff = Pts_diff, T2LBlowouts = LBlowouts, T2LClose = LClose, 
+         T2rawSOS = rawSOS, T2ELOSOS = ELOSOS, T2FgPct = FgPct, T2ThreePtPct = ThreePtPct, 
+         T2ThreePtShots = ThreePtShots, T2FtPct = FtPct, T2FtA = FtA,
+         T2OppFgPct = OppFgPct, T2OppThreePtPct = OppThreePtPct, 
+         T2OppThreePtShots = OppThreePtShots, T2OppFtA = OppFtA, T2Wins = Wins, 
+         T2Losses = Losses, T2Reb = Reb, T2OReb = OReb, T2ORebRat = ORebRat, T2BlkStl = BlkStl, 
+         T2TO = TO, T2AsstRat = AsstRat, T2OppReb = OppReb, T2OppORebRat = OppORebRat, 
+         T2OppBlkStl = OppBlkStl, T2OppAsstRat = OppAsstRat, T2ELO = ELO,
+         T2Quad1Rec = Quad1Rec, T2Quad1Games = Quad1Games, T2Rank = Rank)
+Rd1_data$ELO_diff <- Rd1_data$T1ELO - Rd1_data$T2ELO
+Rd1_data$Seed_diff <- Rd1_data$SeedNum_T1 - Rd1_data$SeedNum_T2
+Rd1_data$Win_pct_dif <- Rd1_data$T1Win_pct - Rd1_data$T2Win_pct
+Rd1_data$PTS_for <- Rd1_data$T1Pts_for - Rd1_data$T2Pts_for
+Rd1_data$PTS_against <- Rd1_data$T1Pts_against - Rd1_data$T2Pts_against
+Rd1_data$ThreePtShots_diff <- Rd1_data$T1ThreePtShots - Rd1_data$T2ThreePtShots
+Rd1_data$Reb_diff <- Rd1_data$T1Reb - Rd1_data$T2Reb
+Rd1_data$ORebRate_diff <- Rd1_data$T1ORebRat - Rd1_data$T2ORebRat
+Rd1_data$OppORebRate_diff <- Rd1_data$T1OppORebRat - Rd1_data$T2OppORebRat
+Rd1_data$rawSOS_diff <- Rd1_data$T1rawSOS - Rd1_data$T2rawSOS
+Rd1_data$ELOSOS_diff <- Rd1_data$T1ELOSOS - Rd1_data$T2ELOSOS
+Rd1_data$Rank_diff <- Rd1_data$T1Rank - Rd1_data$T2Rank
+rd_1_dmatrix <- xgb.DMatrix(data = as.matrix(Rd1_data[, predictors]))
+predictions <- predict(Wfinal_model, newdata = rd_1_dmatrix)
+Rd1_pred$Team <- ifelse(predictions >= 0.5, Rd1_pred$Team1ID, Rd1_pred$Team2ID)
+Rd1_pred$Win <- ifelse(Rd1_pred$Team == Rd1_pred$Team1ID, Rd1_pred$Team1, Rd1_pred$Team2)
+Rd1_pred$Seed <- ifelse(Rd1_pred$Team == Rd1_pred$Team1ID, 
+                        Rd1_pred$SeedNum_T1, Rd1_pred$SeedNum_T2)
+```
+
+
+```{r}
+#Define round by round function
+Rd_by_rd <- function(rd1, map, Predictors_2024, features) {
+  unique_destinations <- unique(unlist(map))
+  new_pred <- data.frame(Tournament = "W",
+                         Slot = unique_destinations,
+                         Team1 = character(length(unique_destinations)),
+                         Team2 = character(length(unique_destinations)),
+                         Team1ID = integer(length(unique_destinations)),
+                         Team2ID = integer(length(unique_destinations)),
+                         SeedNum_T1 = numeric(length(unique_destinations)),
+                         SeedNum_T2 = numeric(length(unique_destinations)))
+  for (i in 1:nrow(rd1)) {
+    Slot <- rd1$Slot[i]
+    Dest <- map[[Slot]]
+    row_index <- which(new_pred$Slot == Dest)
+    if (nchar(as.character(new_pred[row_index, "Team1"])) != 3) {
+      # Data corresponds to Team1
+      new_pred[row_index, "Team1"] <- rd1$Win[i]
+      new_pred[row_index, "Team1ID"] <- rd1$Team[i]
+      new_pred[row_index, "SeedNum_T1"] <- rd1$Seed[i]
+    } else {
+      # Data corresponds to Team2
+      new_pred[row_index, "Team2"] <- rd1$Win[i]
+      new_pred[row_index, "Team2ID"] <- rd1$Team[i]
+      new_pred[row_index, "SeedNum_T2"] <- rd1$Seed[i]
+    }
+  }
+  #Add features
+  Rd1_data <- new_pred %>% 
+    left_join(Predictors_2024, by = c("Team1ID" = "TeamID")) %>% 
+    rename(T1Win_pct = Win_pct, T1Pts_for = Pts_for, T1Pts_against = Pts_against, 
+           T1Pts_diff = Pts_diff, T1LBlowouts = LBlowouts, T1LClose = LClose, 
+           T1rawSOS = rawSOS, T1ELOSOS = ELOSOS, T1FgPct = FgPct, T1ThreePtPct = ThreePtPct, 
+           T1ThreePtShots = ThreePtShots, T1FtPct = FtPct, T1FtA = FtA,
+           T1OppFgPct = OppFgPct, T1OppThreePtPct = OppThreePtPct, 
+           T1OppThreePtShots = OppThreePtShots, T1OppFtA = OppFtA, T1Wins = Wins, 
+           T1Losses = Losses, T1Reb = Reb, T1OReb = OReb, T1ORebRat = ORebRat, 
+           T1BlkStl = BlkStl, 
+           T1TO = TO, T1AsstRat = AsstRat, T1OppReb = OppReb, T1OppORebRat = OppORebRat, 
+           T1OppBlkStl = OppBlkStl, T1OppAsstRat = OppAsstRat, T1ELO = ELO,
+           T1Quad1Rec = Quad1Rec, T1Quad1Games = Quad1Games, T1Rank = Rank)
+  Rd1_data <- Rd1_data %>% 
+    left_join(Predictors_2024, by = c("Team2ID" = "TeamID")) %>% 
+    rename(T2Win_pct = Win_pct, T2Pts_for = Pts_for, T2Pts_against = Pts_against,
+           T2Pts_diff = Pts_diff, T2LBlowouts = LBlowouts, T2LClose = LClose, 
+           T2rawSOS = rawSOS, T2ELOSOS = ELOSOS, T2FgPct = FgPct, T2ThreePtPct = ThreePtPct, 
+           T2ThreePtShots = ThreePtShots, T2FtPct = FtPct, T2FtA = FtA,
+           T2OppFgPct = OppFgPct, T2OppThreePtPct = OppThreePtPct, 
+           T2OppThreePtShots = OppThreePtShots, T2OppFtA = OppFtA, T2Wins = Wins, 
+           T2Losses = Losses, T2Reb = Reb, T2OReb = OReb, T2ORebRat = ORebRat, 
+           T2BlkStl = BlkStl, 
+           T2TO = TO, T2AsstRat = AsstRat, T2OppReb = OppReb, T2OppORebRat = OppORebRat, 
+           T2OppBlkStl = OppBlkStl, T2OppAsstRat = OppAsstRat, T2ELO = ELO,
+           T2Quad1Rec = Quad1Rec, T2Quad1Games = Quad1Games, T2Rank = Rank)
+  Rd1_data$ELO_diff <- Rd1_data$T1ELO - Rd1_data$T2ELO
+  Rd1_data$Seed_diff <- Rd1_data$SeedNum_T1 - Rd1_data$SeedNum_T2
+  Rd1_data$Win_pct_dif <- Rd1_data$T1Win_pct - Rd1_data$T2Win_pct
+  Rd1_data$PTS_for <- Rd1_data$T1Pts_for - Rd1_data$T2Pts_for
+  Rd1_data$PTS_against <- Rd1_data$T1Pts_against - Rd1_data$T2Pts_against
+  Rd1_data$ThreePtShots_diff <- Rd1_data$T1ThreePtShots - Rd1_data$T2ThreePtShots
+  Rd1_data$Reb_diff <- Rd1_data$T1Reb - Rd1_data$T2Reb
+  Rd1_data$ORebRate_diff <- Rd1_data$T1ORebRat - Rd1_data$T2ORebRat
+  Rd1_data$OppORebRate_diff <- Rd1_data$T1OppORebRat - Rd1_data$T2OppORebRat
+  Rd1_data$rawSOS_diff <- Rd1_data$T1rawSOS - Rd1_data$T2rawSOS
+  Rd1_data$ELOSOS_diff <- Rd1_data$T1ELOSOS - Rd1_data$T2ELOSOS
+  Rd1_data$Rank_diff <- Rd1_data$T1Rank - Rd1_data$T2Rank
+  #Predictions
+  rd_1_dmatrix <- xgb.DMatrix(data = as.matrix(Rd1_data[, features]))
+  predictions <- predict(Wfinal_model, newdata = rd_1_dmatrix)
+  new_pred$Team <- ifelse(predictions >= 0.5, new_pred$Team1ID, new_pred$Team2ID)
+  new_pred$Win <- ifelse(new_pred$Team == new_pred$Team1ID, new_pred$Team1, new_pred$Team2)
+  new_pred$Seed <- ifelse(new_pred$Team == new_pred$Team1ID, 
+                          new_pred$SeedNum_T1, new_pred$SeedNum_T2)
+  return(new_pred)
+}
+```
+
+```{r}
+#Rest of rounds
+Rd2_pred <- Rd_by_rd(Rd1_pred, round2_map, Predictors_2024, predictors)
+Rd3_pred <- Rd_by_rd(Rd2_pred, round3_map, Predictors_2024, predictors)
+Rd4_pred <- Rd_by_rd(Rd3_pred, round4_map, Predictors_2024, predictors)
+Rd5_pred <- Rd_by_rd(Rd4_pred, round5_map, Predictors_2024, predictors)
+Rd6_pred <- Rd_by_rd(Rd5_pred, round6_map, Predictors_2024, predictors)
+
+#Combine all data
+Rd12_pred <- rbind(Rd1_pred, Rd2_pred)
+Rd123_pred <- rbind(Rd12_pred, Rd3_pred)
+Rd1234_pred <- rbind(Rd123_pred, Rd4_pred)
+Rd12345_pred <- rbind(Rd1234_pred, Rd5_pred)
+All_pred <- rbind(Rd12345_pred, Rd6_pred) 
+All_pred <- All_pred %>% left_join(WTeams, by = c("Team" = "TeamID"))
+
+WFinal_names <- All_pred %>%  
+  mutate(Bracket = 1) %>% 
+  select(Tournament, Bracket, Slot, Team = Win, TeamName)
+
+WFinal <- All_pred %>%  
+  mutate(Bracket = 1) %>% 
+  select(Tournament, Bracket, Slot, Team = Win)
+WFinal$RowId <- seq_len(nrow(WFinal))
+```
+
+

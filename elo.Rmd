@@ -1,0 +1,140 @@
+---
+title: "elo"
+output: html_document
+date: "2024-03-13"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+#load libraries
+library(readr) # for reading in data
+library(dplyr) # for data cleaning
+library(purrr) # for functional programming
+library(forcats) # for recoding factors
+library(limSolve) # for solving linear equations
+library(sqldf)
+library(XML)
+library(RCurl)
+library(elo)
+setwd("/Users/jakesak/Documents/MM Mania Kaggle/Code")
+```
+
+
+```{r}
+#Mens ELO Code
+CompactResults <- read.csv(file.path("../Data", "MRegularSeasonCompactResults.csv" ))
+
+test <- function(params) {
+  K = params[1]
+  loc = params[2]
+  score = params[3]
+  date = params[4]
+  for (year in min(CompactResults$Season):max(CompactResults$Season)) {
+    results <- CompactResults[which(CompactResults$Season == year),]
+    #Remove rows with NA, NaN, or Inf in critical columns
+    results <- results[!is.na(results$WScore) & !is.na(results$LScore) 
+                       & is.finite(results$WScore) & is.finite(results$LScore), ]
+    results <- results[is.finite(results$DayNum),]
+    #Add result col for scoring elo, 1 for win, 0.5 for ot win
+    results$result <- ifelse(results$NumOT > 0, 0.5, 1)
+    #results$result <- score(results$WScore, results$LScore)
+    
+    #Add score margin, half margin if overtime
+    results$Margin <- ifelse(results$NumOT >0, 0.5*(results$WScore - results$LScore),
+                             results$WScore - results$LScore)
+    #Cap off margin to exclude blowouts
+    margin_cap = 25
+    results$Margin <- pmin(results$Margin, margin_cap)
+    
+    #Add Location value, 1 for home win, -1 for away win, 0 for neutral
+    results$Loc <- ifelse(results$WLoc == "H", -1, 
+                          ifelse(results$WLoc == "A", 1, 0)) * loc
+    
+    #Reverse Day Num so regressed for earlier games
+    results$ReverseDayNum <- (max(results$DayNum) + 1) - results$DayNum 
+    
+    
+    #Confirm data is clean
+    results <- results[is.finite(results$Loc) & is.finite(results$DayNum),]
+    
+    #Create the elo model
+    elo_model <- elo.run(data = results, 
+                         formula = result ~ 
+                           adjust(as.character(WTeamID), Loc)
+                         + as.character(LTeamID) + 
+                           regress(ReverseDayNum, 1500, date), 
+                         k = (K + (results$Margin*score)) )
+    
+    #Expand elo model to data frame
+    elo_results <- elo_model %>%
+      as.data.frame()
+    #Combine results data with elo data
+    results2 <- cbind(results, elo_results)
+    
+    
+    #Test on 2nd half of season
+    mid_date <- median(results$DayNum)
+    test_model <- results[
+      which(results$DayNum > mid_date),]
+    results3 <- merge(x = results2, y = test_model[c("Season", "DayNum",
+                                                         "WTeamID","LTeamID")], 
+                      by = c("Season", "DayNum","WTeamID", "LTeamID"), all.y = TRUE)
+    
+    #Final elos function, add year and team id
+    final_elos <- as.data.frame(final.elos(elo_model))
+    names(final_elos)[1] <- "ELO"
+    final_elos$Season <- year
+    final_elos$TeamID <- row.names(final_elos)
+    
+    
+    #If first year, create final elo dataframe otherwise add final elo for every year
+    ifelse(year == min(CompactResults$Season), final_elo <- final_elos, 
+           final_elo <- rbind(final_elo, final_elos))
+    #If first year, create all games dataframe, otherwise add results2 for every year
+    ifelse(year == min(CompactResults$Season), all_games <- results2, 
+           all_games <- rbind(all_games, results2))
+  }
+  final_elo <<- final_elo
+  all_games <<- na.omit(all_games)
+  results3$error <- (results3$result - results3$p.A)^2
+  errorVal <- sum(results3$error)/nrow(results3)
+  
+  #Confirm data is finite
+  if (!is.finite(errorVal)) {
+    warning("Non-finite value encountered. Returning a large number instead.")
+    return(1e6)  # Return a large but finite value to indicate a poor fit
+  }
+  return(errorVal)
+}
+
+optim(par=c(0,0,0,0), fn=test, 
+      lower = c(0,-Inf,-Inf,0), upper = c(Inf,Inf,Inf,1), method="L-BFGS-B")
+final_elo_M <- final_elo %>%
+  group_by(Season) %>%
+  arrange(Season, desc(ELO)) %>%
+  mutate(Rank = dense_rank(desc(ELO))) %>%
+  ungroup()
+```
+
+
+```{r}
+#Save DataFrames
+setwd("/Users/jakesak/Documents/MM Mania Kaggle/Data")
+write.csv(all_games, file = "all_games.csv", row.names = FALSE)
+write.csv(final_elo_M, file = "final_elo_M.csv", row.names = FALSE)
+```
+
+
+```{r}
+MTeams <- read.csv(file.path("../Data", "MTeams.csv" ))
+elo_2024 <- final_elo_M %>% filter(Season == 2024)
+Final_elo_2024 <- merge(elo_2024, MTeams[, c("TeamID", "TeamName")], 
+                        by.x = "TeamID", by.y = "TeamID", all.x = TRUE)
+sorted_final_elo_2024 <- Final_elo_2024 %>% 
+  arrange(desc(ELO)) %>%
+  mutate(Rank = row_number())
+```
+
