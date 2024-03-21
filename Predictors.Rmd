@@ -311,7 +311,8 @@ for (year in min(DetailedResults$Season):max(DetailedResults$Season)) {
     summarize(WReb = (sum(WOR + WDR)/n()), 
               WOReb = sum(WOR)/n(),
               WORebRat = (sum(WOR/LDR)/n()),
-              WBlkStl = (sum(WBlk+WStl)/n()), 
+              WStl = (sum(WStl)/n()),
+              WBlk = (sum(WBlk)/n()), 
               WTurn = (sum(WTO)/n()), 
               WTurnRat = (sum(WTO/LTO)/n()),
               WAsstRat = (sum(WAst/WTO)/n()),
@@ -323,7 +324,8 @@ for (year in min(DetailedResults$Season):max(DetailedResults$Season)) {
     summarize(LReb = (sum(LOR + LDR)/n()), 
               LOReb = sum(LOR)/n(),
               LORebRat = (sum(LOR/(LOR +WDR))/n()),
-              LBlkStl = (sum(LBlk+LStl)/n()), 
+              LStl = (sum(LStl)/n()),
+              LBlk = (sum(LBlk)/n()),  
               LTurn = (sum(LTO)/n()), 
               LTurnRat = (sum(LTO/WTO)/n()),
               LAsstRat = (sum(LAst/LTO)/n()),
@@ -338,7 +340,8 @@ for (year in min(DetailedResults$Season):max(DetailedResults$Season)) {
     mutate(Reb = (WReb*Wins+LReb*Losses)/(Wins+Losses),
            OReb = (WOReb*Wins+LOReb*Losses)/(Wins+Losses),
            ORebRat = (WORebRat*Wins+LORebRat*Losses)/(Wins+Losses),
-           BlkStl = (WBlkStl*Wins+ LBlkStl*Losses)/(Wins+Losses),
+           Stl = (WStl*Wins+ LStl*Losses)/(Wins+Losses),
+           Blk = (WBlk*Wins+ LBlk*Losses)/(Wins+Losses),
            TO = (WTurn*Wins+ LTurn*Losses)/(Wins+Losses),
            TurnRat = (WTurnRat*Wins+ LTurnRat*Losses)/(Wins+Losses),
            AsstRat = (WAsstRat*Wins+ LAsstRat*Losses)/(Wins+Losses),
@@ -346,7 +349,7 @@ for (year in min(DetailedResults$Season):max(DetailedResults$Season)) {
   #opp in wins 
   OppWdef_df <- data %>% 
     group_by(WTeamID, Season) %>% 
-    summarize(OppWReb = (sum(LOR + LDR)/n()), 
+    summarize(OppWOReb = (sum(LOR)/n()), 
               OppWORebRat = (sum(LOR/WDR)/n()),
               OppWBlkStl = (sum(LBlk+LStl)/n()), 
               OppWAsstRat = (sum(LAst/LTO)/n()),
@@ -355,7 +358,7 @@ for (year in min(DetailedResults$Season):max(DetailedResults$Season)) {
   #opp in losses
   OppLdef_df <- data %>% 
     group_by(LTeamID, Season) %>% 
-    summarize(OppLReb = (sum(WOR + WDR)/n()), 
+    summarize(OppLOReb = (sum(WOR)/n()), 
               OppLORebRat = (sum(WOR/LDR)/n()),
               OppLBlkStl = (sum(WBlk+WStl)/n()), 
               OppLAsstRat = (sum(WAst/WTO)/n()),
@@ -367,14 +370,14 @@ for (year in min(DetailedResults$Season):max(DetailedResults$Season)) {
   opp_def_df$Losses[is.na(opp_def_df$Losses)] <- 0
   opp_def_df <- opp_def_df %>% 
     group_by(TeamID, Season) %>%
-    mutate(OppReb = (OppWReb*Wins+OppLReb*Losses)/(Wins+Losses),
+    mutate(OppOReb = (OppWOReb*Wins+OppLOReb*Losses)/(Wins+Losses),
            OppORebRat = (OppWORebRat*Wins+OppLORebRat*Losses)/(Wins+Losses),
            OppBlkStl = (OppWBlkStl*Wins+ OppLBlkStl*Losses)/(Wins+Losses),
            OppAsstRat = (OppWAsstRat*Wins+ OppLAsstRat*Losses)/(Wins+Losses)) %>% 
     select(-Wins, -Losses)
   def_results <-  merge(def_df, opp_def_df, by = c("TeamID", "Season"), all = TRUE) %>%
-    select(Season, TeamID, Reb, OReb, ORebRat, BlkStl, TO, TurnRat, AsstRat, 
-           OppReb, OppORebRat, OppBlkStl, OppAsstRat)
+    select(Season, TeamID, Reb, OReb, ORebRat, Stl, Blk, TO, TurnRat, AsstRat, 
+           OppOReb, OppORebRat, OppBlkStl, OppAsstRat)
   #Merge fg and def dataframes
   results <- merge(fg_results, def_results, by = c("TeamID", "Season"), all = TRUE)
   #If first year, create final table, otherwise add data

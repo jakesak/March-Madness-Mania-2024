@@ -867,8 +867,7 @@ All_pred <- rbind(Rd12345_pred, Rd6_pred)
 All_pred <- All_pred %>% left_join(WTeams, by = c("Team" = "TeamID"))
 
 WFinal_names <- All_pred %>%  
-  mutate(Bracket = 1) %>% 
-  select(Tournament, Bracket, Slot, Team = Win, TeamName)
+  select(Tournament, Slot, Team = Win, TeamName)
 
 WFinal <- All_pred %>%  
   mutate(Bracket = 1) %>% 

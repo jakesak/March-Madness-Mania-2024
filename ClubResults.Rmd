@@ -179,7 +179,7 @@ Pred_data$ThreePtShots_diff <- Pred_data$T1ThreePtShots - Pred_data$T2ThreePtSho
 Pred_data$Reb_diff <- Pred_data$T1Reb - Pred_data$T2Reb
 Pred_data$ORebRate_diff <- Pred_data$T1ORebRat - Pred_data$T2ORebRat
 Pred_data$OppORebRate_diff <- Pred_data$T1OppORebRat - Pred_data$T2OppORebRat
-Pred_data$Turn_diff = Pred_data$T1TO - Pred_data$T2TO
+Pred_data$Turn_diff <- Pred_data$T1TO - Pred_data$T2TO
 Pred_data$rawSOS_diff <- Pred_data$T1rawSOS - Pred_data$T2rawSOS
 Pred_data$ELOSOS_diff <- Pred_data$T1ELOSOS - Pred_data$T2ELOSOS
 Pred_data$Rank_diff <- Pred_data$T1Rank - Pred_data$T2Rank
