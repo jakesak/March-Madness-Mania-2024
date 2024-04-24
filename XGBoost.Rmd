@@ -81,7 +81,6 @@ results <- results %>%
 results <- results[which(results$Seed_len1 != results$Seed_len2),]
 
 
-set.seed(27)
 #Set Predictors
 predictors <- c("T1Win_pct", "T1Pts_for", "T1Pts_against","T1Pts_diff", 
                 "T1rawSOS", "T1ELOSOS", "T1FgPct", "T1ThreePtPct", "T1ThreePtShots",
@@ -111,18 +110,18 @@ params <- list(
   #objective = "binary:logistic",
   booster = "gbtree",
   eta = 0.015,
-  max_depth = 6,
-  subsample = 0.65,
-  colsample_bytree = 0.8
+  max_depth = 4,
+  subsample = 0.7,
+  colsample_bytree = 0.75
 )
 
 # Cross-validation
 cv_results <- xgb.cv(params = params,
                      data = dtrain,
-                     nrounds = 3000,
+                     nrounds = 2000,
                      nfold = 5,
                      metrics = "logloss",
-                     early_stopping_rounds = 25,
+                     early_stopping_rounds = 20,
                      maximize = FALSE,
                      Prediction = TRUE,
                      verbose = 0)
