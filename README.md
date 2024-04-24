@@ -17,7 +17,7 @@ This project was submitted as an entry in the Kaggle March Machine Learning Mani
 
 Ensure you have R and the required packages (`dplyr`, `xgboost`, etc.) installed. Follow these steps to set up the project environment:
 
-1. Clone this repository: `git clone https://github.com/your-username/march-madness-2024.git`
+1. Clone this repository: `git clone https://github.com/jakesak/march-madness-2024.git`
 2. Set the working directory in RStudio or R console to the cloned repository's location.
 3. Install any missing R packages by running `install.packages(c("dplyr", "xgboost"))`.
 
@@ -25,11 +25,8 @@ Ensure you have R and the required packages (`dplyr`, `xgboost`, etc.) installed
 
 Navigate to the `Code` directory and execute the scripts in the following order:
 
-1. `data_preparation.R` - For data cleaning and preparation.
-2. `feature_engineering.R` - To generate features for the predictive model.
-3. `model_training.R` - To train the machine learning model using XGBoost.
-4. `prediction_generation.R` - To generate tournament predictions based on the trained model.
-
+1. `Mensfinal.R` - To run the complete code using one xgboost output.
+2. `MensAverageRuns.R` - To run 500 predictions and take the average bracket for smoother predictions.
 ## Contributing
 
 Contributions to improve the project are welcome. Follow these steps:
